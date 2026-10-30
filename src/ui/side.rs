@@ -355,7 +355,9 @@ fn spool(ui: &mut egui::Ui, tray: &Value, tray_id: i64, active: bool) {
 
 fn motion(app: &mut App, ui: &mut egui::Ui) {
     let ready = app.is_ready();
-    let can_move = ready && !app.state.is_printing();
+    // Only allow jogging/homing when the machine explicitly reports Idle.
+    // Paused, calibrating, heating, loading filament, etc. are not safe states.
+    let can_move = ready && app.state.machine_status() == Some(1);
     let homed = app
         .state
         .s("toolhead.homed_axes")
@@ -378,6 +380,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         let all_homed = homed.contains('x') && homed.contains('y') && homed.contains('z');
+        let can_jog = can_move && all_homed;
         if app.state.has_status() && !all_homed {
             ui.label(RichText::new("Not all axes homed").small().color(theme::WARN));
         }
@@ -393,7 +396,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
         let mut jog: Option<(&str, f64)> = None;
         let mut home = false;
         let btn = |ui: &mut egui::Ui, text: &str| {
-            ui.add_enabled(can_move, egui::Button::new(text).min_size(Vec2::new(44.0, 30.0)))
+            ui.add_enabled(can_jog, egui::Button::new(text).min_size(Vec2::new(44.0, 30.0)))
                 .clicked()
         };
         ui.horizontal(|ui| {
@@ -407,7 +410,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
                 if btn(ui, "X−") {
                     jog = Some(("x", -step));
                 }
-                if btn(ui, "Home") {
+                if ui.add_enabled(can_move, egui::Button::new("Home").min_size(Vec2::new(44.0, 30.0))).clicked() {
                     home = true;
                 }
                 if btn(ui, "X+") {
@@ -442,7 +445,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
             });
         });
         if ready && !can_move {
-            ui.label(RichText::new("Movement is disabled while printing").small().color(theme::MUTED));
+            ui.label(RichText::new("Movement is disabled unless the machine is idle").small().color(theme::MUTED));
         }
 
         if let Some((axis, distance)) = jog {
