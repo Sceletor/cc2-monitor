@@ -24,6 +24,7 @@ use crate::ui;
 const LOG_CAPACITY: usize = 1000;
 const TOAST_TTL: Duration = Duration::from_secs(6);
 const DETAIL_TIMEOUT: Duration = Duration::from_secs(6);
+const REFILL_TIMEOUT: Duration = Duration::from_secs(8);
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(300);
 const RENDER_POLL: Duration = Duration::from_secs(5);
@@ -336,6 +337,37 @@ impl App {
                 if let Some(info) = result.get("canvas_info") {
                     self.state.canvas = info.clone();
                 }
+                let expected = self.print_job.as_ref().and_then(|job| match job.stage {
+                    Stage::VerifyingRefill { request_id, expected, .. } if id == Some(request_id) => Some(expected),
+                    _ => None,
+                });
+                if let Some(expected) = expected {
+                    if self.state.canvas.get("auto_refill").and_then(Value::as_bool) == Some(expected) {
+                        if let Some(job) = &mut self.print_job {
+                            job.printer_auto_refill = expected;
+                        }
+                        self.send_start_command();
+                    } else {
+                        self.refill_error("CANVAS did not confirm the requested auto-refill setting.");
+                    }
+                }
+            }
+            2004 => {
+                let expected = self.print_job.as_ref().and_then(|job| match job.stage {
+                    Stage::SettingRefill { request_id, expected, .. } if id == Some(request_id) => Some(expected),
+                    _ => None,
+                });
+                if let Some(expected) = expected {
+                    if result.get("error_code").and_then(Value::as_i64) != Some(0) {
+                        self.refill_error("Printer rejected the CANVAS auto-refill change.");
+                    } else if let Some(request_id) = self.send(2005, json!({})) {
+                        if let Some(job) = &mut self.print_job {
+                            job.stage = Stage::VerifyingRefill { since: Instant::now(), request_id, expected };
+                        }
+                    } else {
+                        self.refill_error("Could not verify the CANVAS auto-refill change.");
+                    }
+                }
             }
             1036 => {
                 if let Some(list) = result.get("history_task_list").and_then(Value::as_array) {
@@ -391,10 +423,19 @@ impl App {
             1046 => {
                 let file = result.get("filename").and_then(Value::as_str).unwrap_or_default();
                 if let Some(job) = &mut self.print_job {
+                    // An unrelated/stale 1046 reply must never populate a new print dialog.
                     if matches!(job.stage, Stage::LoadingDetails { .. })
+                        && job.details_request_id.is_some()
+                        && job.details_request_id == id
                         && (file.is_empty() || file == job.filename)
                     {
-                        job.set_detail(result.clone(), &self.state.canvas);
+                        if result.get("color_map").and_then(Value::as_array).is_none() {
+                            job.stage = Stage::DetailsFailed("Printer returned no verifiable G-code color map. Retry file details; printing without a verified map is blocked.".into());
+                        } else if self.state.canvas.get("canvas_list").and_then(Value::as_array).is_none() {
+                            job.stage = Stage::DetailsFailed("CANVAS status is unavailable. Retry after the printer reports its slots.".into());
+                        } else {
+                            job.set_detail(result.clone(), &self.state.canvas);
+                        }
                     }
                 }
                 // Only the file being printed may set the job's layer count.
@@ -413,8 +454,9 @@ impl App {
                 let starting = self
                     .print_job
                     .as_ref()
-                    .is_some_and(|j| matches!(j.stage, Stage::Starting { .. }));
-                if error_code == 0 {
+                    .is_some_and(|j| matches!(j.stage, Stage::Starting { request_id, .. } if Some(request_id) == id));
+                if !starting { return; }
+                if result.get("error_code").and_then(Value::as_i64) == Some(0) {
                     if starting {
                         let name = self.print_job.take().map(|j| j.filename).unwrap_or_default();
                         self.toast(ToastKind::Success, format!("Print started: {name}"));
@@ -570,9 +612,50 @@ impl App {
     fn request_job_details(&mut self) {
         let Some(job) = &self.print_job else { return };
         let (name, media) = (job.filename.clone(), job.media);
-        self.send(1046, json!({"storage_media": media, "filename": name}));
+        let detail_id = self.send(1046, json!({"storage_media": media, "filename": name}));
+        if let Some(job) = &mut self.print_job {
+            job.details_request_id = detail_id;
+            if detail_id.is_none() {
+                job.stage = Stage::DetailsFailed("Cannot request file details from the printer. Check connection and retry.".into());
+            }
+        }
         if let Some(id) = self.send(1045, json!({"storage_media": media, "file_name": name})) {
             self.thumb_requests.insert(id, ThumbFor::PrintDialog);
+        }
+    }
+
+    pub fn retry_job_details(&mut self) {
+        if let Some(job) = &mut self.print_job {
+            if !matches!(job.stage, Stage::DetailsFailed(_)) { return; }
+            job.stage = Stage::LoadingDetails { since: Instant::now() };
+            job.details_request_id = None;
+        } else { return; }
+        self.send(2005, json!({}));
+        self.request_job_details();
+    }
+
+    fn refill_error(&mut self, message: &str) {
+        if let Some(job) = &mut self.print_job {
+            job.stage = Stage::Ready;
+            job.error = Some(message.into());
+        }
+    }
+
+    fn send_start_command(&mut self) {
+        if !self.printer_idle() {
+            self.refill_error("Printer is not idle; start cancelled.");
+            return;
+        }
+        let Some(job) = &self.print_job else { return };
+        if !job.mapping_complete() { self.refill_error("Filament mapping is no longer valid."); return; }
+        let params = job.start_params();
+        if let Some(request_id) = self.send(1020, params) {
+            if let Some(job) = &mut self.print_job {
+                job.error = None;
+                job.stage = Stage::Starting { since: Instant::now(), request_id };
+            }
+        } else {
+            self.refill_error("Failed to queue start-print command.");
         }
     }
 
@@ -585,20 +668,22 @@ impl App {
         if !matches!(job.stage, Stage::Ready) || !job.mapping_complete() {
             return;
         }
-        let params = job.start_params();
-        let (smooth, refill, printer_refill) =
-            (job.smooth_plate, job.auto_refill, job.printer_auto_refill);
+        let (smooth, refill, printer_refill, external) =
+            (job.smooth_plate, job.auto_refill, job.printer_auto_refill, job.use_external_spool);
         self.settings.smooth_plate = smooth;
-        // Auto refill is a Canvas setting, not part of the start command;
-        // commands are handled in order, so it applies before the print starts.
-        if refill != printer_refill {
-            self.send(2004, json!({"enable": refill}));
-        }
-        if self.send(1020, params).is_some() {
-            if let Some(job) = &mut self.print_job {
-                job.error = None;
-                job.stage = Stage::Starting { since: Instant::now() };
+        // Do not start until the printer acknowledges and reports the desired
+        // persistent CANVAS setting. Silent failures are unsafe for auto-refill.
+        if !external && refill != printer_refill {
+            if let Some(request_id) = self.send(2004, json!({"enable": refill})) {
+                if let Some(job) = &mut self.print_job {
+                    job.error = None;
+                    job.stage = Stage::SettingRefill { since: Instant::now(), request_id, expected: refill };
+                }
+            } else {
+                self.refill_error("Failed to queue CANVAS auto-refill setting.");
             }
+        } else {
+            self.send_start_command();
         }
     }
 
@@ -643,8 +728,12 @@ impl App {
                 }
             }
             Stage::LoadingDetails { since } if since.elapsed() > DETAIL_TIMEOUT => {
-                // Still printable without color info; the printer then picks the tray.
-                job.set_detail(Value::Null, &self.state.canvas);
+                job.stage = Stage::DetailsFailed("File detail request timed out. Retry; start is blocked until material mapping is verified.".into());
+            }
+            Stage::SettingRefill { since, .. } | Stage::VerifyingRefill { since, .. }
+                if since.elapsed() > REFILL_TIMEOUT => {
+                job.stage = Stage::Ready;
+                job.error = Some("Timed out confirming CANVAS auto-refill. Start cancelled; verify the printer setting.".into());
             }
             Stage::Starting { since } if since.elapsed() > START_TIMEOUT => {
                 job.stage = Stage::Ready;
