@@ -40,3 +40,25 @@ impl Default for Settings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_code_never_appears_in_saved_settings() {
+        let mut settings = Settings::default();
+        settings.access_code = "unique-test-code-secret".to_owned();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(!serialized.contains("unique-test-code-secret"));
+        assert!(!serialized.contains("\\"access_code\\""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_roundtrip_for_current_user() {
+        let protected = crate::secret::protect("test-token-123").expect("protect");
+        assert_ne!(protected, "test-token-123");
+        assert_eq!(crate::secret::unprotect(&protected).as_deref(), Some("test-token-123"));
+    }
+}
