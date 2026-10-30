@@ -11,6 +11,13 @@ protocol log. It is a single executable with no server, browser or runtime.
 
 ## Download
 
+For the Windows x64 build of this fork, see the
+[Actions ZIP download instructions](docs/WINDOWS-DOWNLOAD.md).
+The existing PR workflow tests and builds the executable in one cancellable
+run per PR update, with artifacts retained for 14 days and no scheduled runs.
+
+### Upstream release
+
 Grab the Windows build from the
 [latest release](https://github.com/AlvaroEPena/cc2-monitor/releases/latest):
 unzip it and run `CC2 Monitor.exe`. Nothing needs installing. Settings are
@@ -22,7 +29,7 @@ executable is not code-signed. Choose **More info → Run anyway**.
 ## Build
 
 ```bash
-cargo build --release
+cargo build --release --locked
 ```
 
 The binary ends up at `target/release/cc2-monitor(.exe)`.

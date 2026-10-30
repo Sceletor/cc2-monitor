@@ -1,4 +1,4 @@
-name: Security regression checks
+name: Windows x64 build and security checks
 
 on:
   pull_request:
@@ -13,11 +13,45 @@ permissions:
 
 jobs:
   windows-test:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
       - name: Run unit and integration tests
-        run: cargo test --locked --all-targets
-      - name: Check release build
-        run: cargo check --locked --release
+        run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
+      - name: Build native Windows x64 executable
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Prepare download and SHA-256
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/cc2-monitor.exe dist/
+          Copy-Item LICENSE dist/
+          Copy-Item docs/WINDOWS-DOWNLOAD.md dist/README.md
+          $hash = (Get-FileHash dist/cc2-monitor.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  cc2-monitor.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          "### Windows x64 download" >> $env:GITHUB_STEP_SUMMARY
+          "Download **cc2-monitor-windows-x64** from this run's Artifacts section, extract the ZIP, then run cc2-monitor.exe." >> $env:GITHUB_STEP_SUMMARY
+          "Commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "SHA-256 (EXE): $hash" >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload Windows x64 ZIP
+        id: upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: cc2-monitor-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Link download in run summary
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: '"[Download ZIP]($env:ARTIFACT_URL)" >> $env:GITHUB_STEP_SUMMARY'
