@@ -56,6 +56,7 @@ pub fn upload_file(
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(180))
         .timeout_write(Duration::from_secs(180))
+        .redirects(0)
         .build();
     let url = format!("http://{host}/upload");
 

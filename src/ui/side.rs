@@ -9,8 +9,8 @@ use super::theme;
 use crate::app::{App, Confirm, Pending};
 use crate::printer::codes;
 
-const NOZZLE_MAX: f64 = 350.0;
-const BED_MAX: f64 = 120.0;
+const NOZZLE_MAX: u16 = 350;
+const BED_MAX: u16 = 120;
 
 /// (status key, label) for fans the user can set.
 const CONTROL_FANS: [(&str, &str); 3] = [
@@ -21,11 +21,11 @@ const CONTROL_FANS: [(&str, &str); 3] = [
 const READONLY_FANS: [(&str, &str); 2] = [("heater_fan", "Heatbreak"), ("controller_fan", "Controller")];
 
 /// (name, nozzle °C, bed °C)
-const PRESETS: [(&str, f64, f64); 4] = [
-    ("PLA", 210.0, 60.0),
-    ("PETG", 240.0, 80.0),
-    ("ABS", 260.0, 100.0),
-    ("Cool down", 0.0, 0.0),
+const PRESETS: [(&str, u16, u16); 4] = [
+    ("PLA", 210, 60),
+    ("PETG", 240, 80),
+    ("ABS", 260, 100),
+    ("Cool down", 0, 0),
 ];
 
 pub fn draw(app: &mut App, ui: &mut egui::Ui) {
@@ -81,8 +81,8 @@ fn temperatures(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             for (name, nozzle, bed) in PRESETS {
-                let hint = if nozzle > 0.0 {
-                    format!("Nozzle {nozzle:.0}° / bed {bed:.0}°")
+                let hint = if nozzle > 0 {
+                    format!("Nozzle {nozzle}° / bed {bed}°")
                 } else {
                     "Turn both heaters off".into()
                 };
@@ -98,13 +98,20 @@ fn temperatures(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
-    let params = match (set_nozzle, set_bed) {
+    if let Some(params) = temperature_params(set_nozzle, set_bed) {
+        app.send(1028, params);
+    }
+}
+
+// Use integer JSON numbers on the wire (60, not 60.0), matching the web
+// controls and avoiding firmware compatibility issues with numeric types.
+fn temperature_params(nozzle: Option<u16>, bed: Option<u16>) -> Option<Value> {
+    Some(match (nozzle, bed) {
         (Some(n), Some(b)) => json!({"extruder": n, "heater_bed": b}),
         (Some(n), None) => json!({"extruder": n}),
         (None, Some(b)) => json!({"heater_bed": b}),
-        (None, None) => return,
-    };
-    app.send(1028, params);
+        (None, None) => return None,
+    })
 }
 
 /// One heater line in the grid. Returns a new target when the user sets one.
@@ -116,9 +123,9 @@ fn heater_row(
     current: Option<f64>,
     target: Option<f64>,
     input: &mut String,
-    max: f64,
+    max: u16,
     ready: bool,
-) -> Option<f64> {
+) -> Option<u16> {
     dot_label(ui, name, color);
     ui.horizontal(|ui| {
         ui.label(RichText::new(theme::fmt_temp(current)).size(16.0).strong());
@@ -139,13 +146,13 @@ fn heater_row(
         );
         let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if ui.add_enabled(ready, egui::Button::new("Set")).clicked() || entered {
-            if let Ok(v) = input.trim().parse::<f64>() {
-                out = Some(v.clamp(0.0, max));
+            if let Ok(v) = input.trim().parse::<u16>() {
+                out = Some(v.min(max));
                 input.clear();
             }
         }
         if ui.add_enabled(ready, egui::Button::new("Off")).clicked() {
-            out = Some(0.0);
+            out = Some(0);
         }
     });
     ui.end_row();
@@ -355,7 +362,9 @@ fn spool(ui: &mut egui::Ui, tray: &Value, tray_id: i64, active: bool) {
 
 fn motion(app: &mut App, ui: &mut egui::Ui) {
     let ready = app.is_ready();
-    let can_move = ready && !app.state.is_printing();
+    // Only allow jogging/homing when the machine explicitly reports Idle.
+    // Paused, calibrating, heating, loading filament, etc. are not safe states.
+    let can_move = ready && app.state.machine_status() == Some(1);
     let homed = app
         .state
         .s("toolhead.homed_axes")
@@ -378,6 +387,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         let all_homed = homed.contains('x') && homed.contains('y') && homed.contains('z');
+        let can_jog = can_move && all_homed;
         if app.state.has_status() && !all_homed {
             ui.label(RichText::new("Not all axes homed").small().color(theme::WARN));
         }
@@ -393,7 +403,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
         let mut jog: Option<(&str, f64)> = None;
         let mut home = false;
         let btn = |ui: &mut egui::Ui, text: &str| {
-            ui.add_enabled(can_move, egui::Button::new(text).min_size(Vec2::new(44.0, 30.0)))
+            ui.add_enabled(can_jog, egui::Button::new(text).min_size(Vec2::new(44.0, 30.0)))
                 .clicked()
         };
         ui.horizontal(|ui| {
@@ -407,7 +417,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
                 if btn(ui, "X−") {
                     jog = Some(("x", -step));
                 }
-                if btn(ui, "Home") {
+                if ui.add_enabled(can_move, egui::Button::new("Home").min_size(Vec2::new(44.0, 30.0))).clicked() {
                     home = true;
                 }
                 if btn(ui, "X+") {
@@ -442,7 +452,7 @@ fn motion(app: &mut App, ui: &mut egui::Ui) {
             });
         });
         if ready && !can_move {
-            ui.label(RichText::new("Movement is disabled while printing").small().color(theme::MUTED));
+            ui.label(RichText::new("Movement is disabled unless the machine is idle").small().color(theme::MUTED));
         }
 
         if let Some((axis, distance)) = jog {
@@ -486,4 +496,36 @@ fn bool_i(state: &crate::printer::PrinterState, path: &str) -> Option<i64> {
 
 fn flag(v: Option<i64>) -> Option<String> {
     v.map(|v| if v != 0 { "Connected".into() } else { "Not connected".into() })
+}
+
+#[cfg(test)]
+mod temperature_tests {
+    use super::*;
+
+    #[test]
+    fn temperature_commands_use_integer_wire_values_and_only_requested_heaters() {
+        // Regression: f64 targets serialized as 60.0 / 210.0. Comparing JSON
+        // text also checks the numeric representation sent to the printer.
+        for (nozzle, bed, expected) in [
+            (None, Some(60), r#"{"heater_bed":60}"#),
+            (Some(210), None, r#"{"extruder":210}"#),
+            (Some(0), None, r#"{"extruder":0}"#),
+            (None, Some(0), r#"{"heater_bed":0}"#),
+        ] {
+            assert_eq!(temperature_params(nozzle, bed).unwrap().to_string(), expected);
+        }
+        assert!(temperature_params(None, None).is_none());
+    }
+
+    #[test]
+    fn all_presets_including_cooldown_use_integer_targets() {
+        for (_, nozzle, bed) in PRESETS {
+            let params = temperature_params(Some(nozzle), Some(bed)).unwrap();
+            let encoded = params.to_string();
+            let wire: Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(wire["extruder"].as_u64(), Some(u64::from(nozzle)));
+            assert_eq!(wire["heater_bed"].as_u64(), Some(u64::from(bed)));
+            assert_eq!(wire.as_object().unwrap().len(), 2);
+        }
+    }
 }
