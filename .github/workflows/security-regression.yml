@@ -1,10 +1,12 @@
 name: Security regression checks
 
 on:
-  push:
-    branches:
-      - fix/security-canvas-safety-20261030
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: security-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
