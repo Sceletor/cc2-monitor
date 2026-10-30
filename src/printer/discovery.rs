@@ -49,11 +49,19 @@ fn query(target: SocketAddr, timeout: Duration, broadcast: bool) -> std::io::Res
             Ok(r) => r,
             Err(_) => break,
         };
+        // A directed probe must never accept a forged response from a different host.
+        if !broadcast && from.ip() != target.ip() {
+            continue;
+        }
         let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else {
             continue;
         };
         let Some(r) = v.get("result") else { continue };
         let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        // Ignore arbitrary UDP traffic lacking a printer serial number.
+        if s("sn").is_empty() {
+            continue;
+        }
         let ip = from.ip().to_string();
         if found.iter().any(|d| d.ip == ip) {
             continue;
