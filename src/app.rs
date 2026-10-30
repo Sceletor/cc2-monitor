@@ -938,9 +938,14 @@ pub fn reveal_in_folder(path: &Path) {
 
 fn decode_thumbnail(b64: &str) -> Option<egui::ColorImage> {
     let data = b64.split_once("base64,").map_or(b64, |(_, d)| d);
+    if data.len() > 12_000_000 { return None; }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
         .ok()?;
+    let probe = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format().ok()?;
+    let (width, height) = probe.into_dimensions().ok()?;
+    if (width as u64) * (height as u64) > 8_000_000 { return None; }
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     Some(egui::ColorImage::from_rgba_unmultiplied(
         [img.width() as usize, img.height() as usize],
