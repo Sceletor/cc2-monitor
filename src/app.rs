@@ -955,9 +955,11 @@ impl App {
 pub fn reveal_in_folder(path: &Path) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt as _;
+        // Let Command escape the file path rather than embedding it in a raw
+        // Windows command-line argument.
         let _ = std::process::Command::new("explorer")
-            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .arg("/select,")
+            .arg(path)
             .spawn();
     }
     #[cfg(not(windows))]
