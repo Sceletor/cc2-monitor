@@ -239,7 +239,7 @@ impl PrinterClient {
     /// Send a command and return its request id, which the printer echoes in
     /// the reply. `None` if not registered yet (the command is dropped).
     pub fn send(&self, method: i64, params: Value) -> Option<u64> {
-        self.is_ready().then(|| self.shared.send(method, params))
+        self.is_ready().then(|| self.shared.send(method, params)).flatten()
     }
 }
 
@@ -423,7 +423,8 @@ impl Shared {
         }
 
         if topic.ends_with("/register_response") {
-            if !topic.contains(&self.request_id) {
+            // Compare the entire topic; a substring match is not sufficient.
+            if topic != format!("elegoo/{}/{}/register_response", self.sn(), self.request_id) {
                 return;
             }
             if msg.get("error").and_then(Value::as_str) == Some("ok") {
@@ -436,29 +437,36 @@ impl Shared {
                 }
                 self.update_phase();
             }
-        } else if topic.ends_with(&format!("/{}/api_response", self.client_id)) {
+        } else if topic == format!("elegoo/{}/{}/api_response", self.sn(), self.client_id) {
             self.missed_pings.store(0, Ordering::Relaxed);
             if let Some(method) = method {
                 self.emit(Event::Response { method, msg });
             }
-        } else if topic.ends_with("/api_status") {
+        } else if topic == format!("elegoo/{}/api_status", self.sn()) {
             self.emit(Event::Status(msg));
         }
     }
 
-    fn send(&self, method: i64, params: Value) -> u64 {
+    fn send(&self, method: i64, params: Value) -> Option<u64> {
         let sn = self.sn();
         if sn.is_empty() {
-            return 0;
+            return None;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let topic = format!("elegoo/{sn}/{}/api_request", self.client_id);
         let body = json!({"id": id, "method": method, "params": params}).to_string();
-        self.log(Dir::Sent, &topic, Some(method), &body);
-        let _ = self
-            .mqtt
-            .try_publish(topic, QoS::AtMostOnce, false, body.into_bytes());
-        id
+        // Only report a request ID when MQTT accepted it into the local queue.
+        // QoS 0 is still not delivery confirmation; critical actions must await a reply.
+        match self.mqtt.try_publish(topic.clone(), QoS::AtMostOnce, false, body.clone().into_bytes()) {
+            Ok(()) => {
+                self.log(Dir::Sent, &topic, Some(method), &body);
+                Some(id)
+            }
+            Err(e) => {
+                self.info(format!("Failed to queue {method}: {e}"));
+                None
+            }
+        }
     }
 
     fn tick_loop(&self) {
