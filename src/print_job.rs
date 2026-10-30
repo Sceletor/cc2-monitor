@@ -56,6 +56,9 @@ pub enum Stage {
         since: Instant,
     },
     Ready,
+    DetailsFailed(String),
+    SettingRefill { since: Instant, request_id: u64, expected: bool },
+    VerifyingRefill { since: Instant, request_id: u64, expected: bool },
     Starting {
         since: Instant,
     },
@@ -73,6 +76,14 @@ pub struct PrintJob {
     pub trays: Vec<Tray>,
     /// For each tool, an index into `trays`.
     pub mapping: Vec<Option<usize>>,
+    /// Request ID of the file-detail response we are waiting for.
+    pub details_request_id: Option<u64>,
+    pub detail_verified: bool,
+    pub canvas_status_verified: bool,
+    pub canvas_connected: bool,
+    /// Explicit user overrides; never enabled by automatic slot assignment.
+    pub use_external_spool: bool,
+    pub allow_material_mismatch: bool,
     pub level_bed: bool,
     pub timelapse: bool,
     /// Plate side: false = textured high-temp (A), true = smooth low-temp (B).
@@ -96,6 +107,12 @@ impl PrintJob {
             tools: Vec::new(),
             trays: Vec::new(),
             mapping: Vec::new(),
+            details_request_id: None,
+            detail_verified: false,
+            canvas_status_verified: false,
+            canvas_connected: false,
+            use_external_spool: false,
+            allow_material_mismatch: false,
             level_bed: true,
             timelapse: false,
             smooth_plate: false,
@@ -108,6 +125,11 @@ impl PrintJob {
 
     /// Fill in tools from a 1046 reply and choose initial tray assignments.
     pub fn set_detail(&mut self, detail: Value, canvas: &Value) {
+        self.detail_verified = detail.get("color_map").and_then(Value::as_array).is_some();
+        self.canvas_status_verified = canvas.get("canvas_list").and_then(Value::as_array).is_some();
+        self.canvas_connected = canvas.get("canvas_list").and_then(Value::as_array).is_some_and(|units| {
+            units.iter().any(|unit| unit.get("connected").and_then(Value::as_i64) == Some(1))
+        });
         self.tools = tools_from_detail(&detail);
         self.trays = trays_from_canvas(canvas);
         self.mapping = auto_map(&self.tools, &self.trays);
@@ -120,20 +142,36 @@ impl PrintJob {
         self.stage = Stage::Ready;
     }
 
-    /// Every tool has a tray, or there is no Canvas to map onto.
+    /// Fail closed if file metadata, Canvas state, mappings or material types are unverified.
     pub fn mapping_complete(&self) -> bool {
-        self.trays.is_empty() || self.mapping.iter().all(Option::is_some)
+        if !self.detail_verified || !self.canvas_status_verified {
+            return false;
+        }
+        if self.use_external_spool || !self.canvas_connected {
+            return true;
+        }
+        !self.tools.is_empty()
+            && self.tools.len() == self.mapping.len()
+            && self.mapping.iter().enumerate().all(|(i, selection)| {
+                selection
+                    .and_then(|idx| self.trays.get(idx))
+                    .is_some_and(|tray| {
+                        self.allow_material_mismatch
+                            || (!self.tools[i].kind.trim().is_empty()
+                                && self.tools[i].kind.eq_ignore_ascii_case(&tray.kind))
+                    })
+            })
     }
 
     pub fn start_params(&self) -> Value {
-        let slot_map: Vec<Value> = if self.trays.is_empty() {
+        let slot_map: Vec<Value> = if self.use_external_spool || !self.canvas_connected {
             Vec::new()
         } else {
             self.tools
                 .iter()
                 .zip(&self.mapping)
                 .filter_map(|(tool, m)| {
-                    let tray = &self.trays[(*m)?];
+                    let tray = self.trays.get((*m)?)?;
                     Some(json!({"t": tool.t, "canvas_id": tray.canvas_id, "tray_id": tray.tray_id}))
                 })
                 .collect()
@@ -155,7 +193,7 @@ impl PrintJob {
     /// Warning for a tool's current assignment, if the filament looks wrong.
     pub fn mismatch(&self, tool_index: usize) -> Option<String> {
         let tool = &self.tools[tool_index];
-        let tray = &self.trays[self.mapping.get(tool_index).copied().flatten()?];
+        let tray = self.trays.get(self.mapping.get(tool_index).copied().flatten()?)?;
         if !tool.kind.is_empty() && !tool.kind.eq_ignore_ascii_case(&tray.kind) {
             return Some(format!("File expects {}, slot has {}", tool.kind, tray.kind));
         }
@@ -218,15 +256,15 @@ pub fn auto_map(tools: &[Tool], trays: &[Tray]) -> Vec<Option<usize>> {
     tools
         .iter()
         .map(|tool| {
+            // Material compatibility is mandatory. Never prefer a free PETG tray
+            // over reusing an already-selected PLA tray, for example.
             let score = |i: usize| {
-                let tray = &trays[i];
-                let kind_penalty = if tool.kind.eq_ignore_ascii_case(&tray.kind) { 0.0 } else { 1000.0 };
-                let reuse_penalty = if used[i] { 10_000.0 } else { 0.0 };
-                kind_penalty
-                    + reuse_penalty
-                    + color_distance(&tool.color, &tray.color).unwrap_or(500.0)
+                let reuse_penalty = if used[i] { 1000.0 } else { 0.0 };
+                reuse_penalty + color_distance(&tool.color, &trays[i].color).unwrap_or(500.0)
             };
-            let best = (0..trays.len()).min_by(|&a, &b| score(a).total_cmp(&score(b)))?;
+            let best = (0..trays.len())
+                .filter(|&i| !tool.kind.trim().is_empty() && tool.kind.eq_ignore_ascii_case(&trays[i].kind))
+                .min_by(|&a, &b| score(a).total_cmp(&score(b)))?;
             used[best] = true;
             Some(best)
         })
@@ -305,7 +343,7 @@ mod tests {
     #[test]
     fn no_canvas_sends_empty_slot_map() {
         let mut job = PrintJob::new("a.gcode".into(), "local", Stage::Ready);
-        job.set_detail(json!({"color_map": [{"t": 0, "name": "PLA", "color": "#fff"}]}), &Value::Null);
+        job.set_detail(json!({"color_map": [{"t": 0, "name": "PLA", "color": "#fff"}]}), &json!({"canvas_list": []}));
         assert!(job.mapping_complete());
         assert_eq!(job.start_params()["config"]["slot_map"], json!([]));
     }
@@ -314,6 +352,46 @@ mod tests {
     fn mismatch_warns_on_material() {
         let mut job = PrintJob::new("a.gcode".into(), "local", Stage::Ready);
         job.set_detail(json!({"color_map": [{"t": 0, "name": "ABS", "color": "#000000"}]}), &canvas());
+        assert!(!job.mapping_complete());
+        // An incompatible tray must be selected deliberately; then explicit
+        // acceptance is required before enabling the Start button.
+        job.mapping[0] = Some(2);
         assert!(job.mismatch(0).unwrap().contains("ABS"));
+        assert!(!job.mapping_complete());
+        job.allow_material_mismatch = true;
+        assert!(job.mapping_complete());
     }
+    #[test]
+    fn never_prefers_wrong_material_over_reusing_a_tray() {
+        let trays = trays_from_canvas(&canvas());
+        let tools = vec![
+            Tool { t: 0, kind: "PLA".into(), color: "#111111".into() },
+            Tool { t: 1, kind: "PLA".into(), color: "#111111".into() },
+            Tool { t: 2, kind: "PLA".into(), color: "#111111".into() },
+        ];
+        let picks = auto_map(&tools, &trays);
+        assert!(picks.iter().all(|idx| matches!(idx, Some(0) | Some(1))));
+        assert!(picks.iter().all(|idx| trays[idx.unwrap()].kind == "PLA"));
+    }
+
+    #[test]
+    fn missing_metadata_or_canvas_status_blocks_start() {
+        let mut job = PrintJob::new("a.gcode".into(), "local", Stage::Ready);
+        job.set_detail(Value::Null, &canvas());
+        assert!(!job.mapping_complete());
+        job.set_detail(json!({"color_map": [{"t": 0, "name": "PLA"}]}), &Value::Null);
+        assert!(!job.mapping_complete());
+    }
+
+    #[test]
+    fn empty_canvas_slots_do_not_silently_select_external_spool() {
+        let mut job = PrintJob::new("a.gcode".into(), "local", Stage::Ready);
+        let c = json!({"canvas_list": [{ "connected": 1, "canvas_id": 0, "tray_list": [] }]});
+        job.set_detail(json!({"color_map": [{"t": 0, "name": "PLA"}]}), &c);
+        assert!(!job.mapping_complete());
+        job.use_external_spool = true;
+        assert!(job.mapping_complete());
+        assert_eq!(job.start_params()["config"]["slot_map"], json!([]));
+    }
+
 }
