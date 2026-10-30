@@ -11,6 +11,7 @@ use crate::printer::codes;
 
 enum Action {
     Start,
+    RetryDetails,
     Close,
 }
 
@@ -94,6 +95,25 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
                     });
                     return;
                 }
+                Stage::DetailsFailed(err) => {
+                    ui.label(RichText::new(err).color(theme::ERR));
+                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Retry file details").clicked() {
+                            action = Some(Action::RetryDetails);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = Some(Action::Close);
+                        }
+                    });
+                    return;
+                }
+                Stage::SettingRefill { .. } | Stage::VerifyingRefill { .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Verifying CANVAS auto-refill setting before starting…");
+                    });
+                    return;
+                }
                 Stage::Failed(err) => {
                     ui.label(RichText::new(err).color(theme::ERR));
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -108,8 +128,16 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
             let starting = matches!(job.stage, Stage::Starting { .. });
 
             ui.label(theme::section_title("Filament"));
-            if job.trays.is_empty() {
-                ui.label(RichText::new("No Canvas connected. The print uses the external spool.").color(theme::MUTED));
+            if job.canvas_connected {
+                ui.checkbox(&mut job.use_external_spool, "Use external spool (disable CANVAS slot mapping)")
+                    .on_hover_text("Requires deliberate selection. No CANVAS slot mapping is sent.");
+            }
+            if !job.canvas_status_verified {
+                ui.label(RichText::new("CANVAS status unavailable; printing is blocked.").color(theme::ERR));
+            } else if job.use_external_spool || !job.canvas_connected {
+                ui.label(RichText::new("External spool selected; confirm the filament physically loaded.").color(theme::WARN));
+            } else if job.trays.is_empty() {
+                ui.label(RichText::new("CANVAS connected, but no loaded slots are available. Choose external spool explicitly or load filament.").color(theme::ERR));
             } else if job.tools.is_empty() {
                 ui.label(
                     RichText::new("The file has no color information, so the printer chooses the slot.")
@@ -151,6 +179,24 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
                 });
             }
 
+            if !job.use_external_spool && job.canvas_connected {
+                let material_mismatch = job.tools.iter().enumerate().any(|(i, tool)| {
+                    job.mapping.get(i).copied().flatten()
+                        .and_then(|idx| job.trays.get(idx))
+                        .is_some_and(|tray| tool.kind.trim().is_empty()
+                            || !tool.kind.eq_ignore_ascii_case(&tray.kind))
+                });
+                if material_mismatch {
+                    ui.checkbox(&mut job.allow_material_mismatch,
+                        "I accept the material mismatch and its temperature risks")
+                        .on_hover_text("Only enable when you deliberately want different material than the G-code expects.");
+                } else {
+                    job.allow_material_mismatch = false;
+                }
+                if !job.mapping_complete() {
+                    ui.label(RichText::new("Printing disabled until every tool has a verified, compatible slot.").color(theme::WARN));
+                }
+            }
             ui.add_space(6.0);
             ui.label(theme::section_title("Options"));
             ui.horizontal(|ui| {
@@ -162,7 +208,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
             });
             ui.checkbox(&mut job.level_bed, "Auto bed leveling before printing");
             ui.checkbox(&mut job.timelapse, "Record a timelapse");
-            if !job.trays.is_empty() {
+            if job.canvas_connected && !job.use_external_spool {
                 let changed = job.auto_refill != job.printer_auto_refill;
                 ui.checkbox(&mut job.auto_refill, "Canvas auto refill")
                     .on_hover_text(
@@ -210,6 +256,7 @@ pub fn draw(app: &mut App, ctx: &egui::Context) {
 
     match action {
         Some(Action::Start) => app.start_print(),
+        Some(Action::RetryDetails) => app.retry_job_details(),
         Some(Action::Close) => app.cancel_print_job(),
         None => {}
     }
