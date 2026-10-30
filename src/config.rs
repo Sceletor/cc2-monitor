@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 
 pub const STORAGE_KEY: &str = "settings";
 pub const DEFAULT_ACCESS_CODE: &str = "123456";
+fn default_access_code() -> String { DEFAULT_ACCESS_CODE.to_owned() }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub ip: String,
+    #[serde(skip, default = "default_access_code")]
     pub access_code: String,
+    pub protected_access_code: String,
     pub serial: String,
     pub auto_connect: bool,
     pub camera_on: bool,
@@ -27,6 +30,7 @@ impl Default for Settings {
         Self {
             ip: String::new(),
             access_code: DEFAULT_ACCESS_CODE.into(),
+            protected_access_code: String::new(),
             serial: String::new(),
             auto_connect: true,
             camera_on: true,
