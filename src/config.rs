@@ -51,7 +51,7 @@ mod tests {
         settings.access_code = "unique-test-code-secret".to_owned();
         let serialized = serde_json::to_string(&settings).unwrap();
         assert!(!serialized.contains("unique-test-code-secret"));
-        assert!(!serialized.contains("\\"access_code\\""));
+        assert!(!serialized.contains(r#""access_code""#));
     }
 
     #[cfg(windows)]
