@@ -7,6 +7,7 @@ mod camera;
 mod config;
 mod print_job;
 mod printer;
+mod secret;
 mod ui;
 
 fn main() -> eframe::Result {
