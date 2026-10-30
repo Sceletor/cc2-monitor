@@ -356,7 +356,7 @@ impl App {
                     _ => None,
                 });
                 if let Some(expected) = expected {
-                    if self.state.canvas.get("auto_refill").and_then(Value::as_bool) == Some(expected) {
+                    if result.get("canvas_info").and_then(|v| v.get("auto_refill")).and_then(Value::as_bool) == Some(expected) {
                         if let Some(job) = &mut self.print_job {
                             job.printer_auto_refill = expected;
                         }
@@ -662,6 +662,25 @@ impl App {
         }
         let Some(job) = &self.print_job else { return };
         if !job.mapping_complete() { self.refill_error("Filament mapping is no longer valid."); return; }
+        // Revalidate the previously chosen physical trays against the latest
+        // CANVAS status, especially after a 2005 refresh. Never silently use a
+        // slot whose material/color changed since the dialog opened.
+        if job.canvas_connected && !job.use_external_spool {
+            let live_trays = crate::print_job::trays_from_canvas(&self.state.canvas);
+            let unchanged = job.mapping.iter().all(|selection| {
+                selection.and_then(|i| job.trays.get(i)).is_some_and(|saved| {
+                    live_trays.iter().any(|live| {
+                        live.canvas_id == saved.canvas_id && live.tray_id == saved.tray_id
+                            && live.kind.eq_ignore_ascii_case(&saved.kind)
+                            && live.color.eq_ignore_ascii_case(&saved.color)
+                    })
+                })
+            });
+            if !unchanged {
+                self.refill_error("CANVAS slots changed since file details were loaded. Reopen the file and verify material mapping.");
+                return;
+            }
+        }
         let params = job.start_params();
         if let Some(request_id) = self.send(1020, params) {
             if let Some(job) = &mut self.print_job {
@@ -682,8 +701,8 @@ impl App {
         if !matches!(job.stage, Stage::Ready) || !job.mapping_complete() {
             return;
         }
-        let (smooth, refill, printer_refill, external) =
-            (job.smooth_plate, job.auto_refill, job.printer_auto_refill, job.use_external_spool);
+        let (smooth, refill, printer_refill, external, canvas_connected) =
+            (job.smooth_plate, job.auto_refill, job.printer_auto_refill, job.use_external_spool, job.canvas_connected);
         self.settings.smooth_plate = smooth;
         // Do not start until the printer acknowledges and reports the desired
         // persistent CANVAS setting. Silent failures are unsafe for auto-refill.
@@ -695,6 +714,17 @@ impl App {
                 }
             } else {
                 self.refill_error("Failed to queue CANVAS auto-refill setting.");
+            }
+        } else if !external && canvas_connected {
+            // Re-read CANVAS even when auto-refill did not change, because its
+            // slots or the persistent setting may have changed since dialog load.
+            if let Some(request_id) = self.send(2005, json!({})) {
+                if let Some(job) = &mut self.print_job {
+                    job.error = None;
+                    job.stage = Stage::VerifyingRefill { since: Instant::now(), request_id, expected: refill };
+                }
+            } else {
+                self.refill_error("Cannot verify current CANVAS status before printing.");
             }
         } else {
             self.send_start_command();
