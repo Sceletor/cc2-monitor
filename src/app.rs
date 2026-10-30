@@ -779,7 +779,7 @@ impl App {
                 job.stage = Stage::Ready;
                 job.error = Some("Timed out confirming CANVAS auto-refill. Start cancelled; verify the printer setting.".into());
             }
-            Stage::Starting { since } if since.elapsed() > START_TIMEOUT => {
+            Stage::Starting { since, .. } if since.elapsed() > START_TIMEOUT => {
                 job.stage = Stage::Ready;
                 job.error = Some("No answer from the printer. Check its screen before retrying.".into());
             }
