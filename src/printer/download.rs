@@ -35,6 +35,7 @@ pub fn download_file(
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(read_timeout)
+        .redirects(0)
         .build();
     let resp = agent
         .get(&format!("http://{host}/download"))
