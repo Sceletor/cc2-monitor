@@ -1,6 +1,6 @@
 [package]
 name = "cc2-monitor"
-version = "1.0.0"
+version = "1.0.1-beta.1"
 edition = "2021"
 description = "Native desktop monitor for the Elegoo Centauri Carbon 2"
 license = "MIT"

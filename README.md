@@ -11,6 +11,10 @@ protocol log. It is a single executable with no server, browser or runtime.
 
 ## Download
 
+Download the Windows x64 ZIP from this fork's
+[v1.0.1-beta.1 release](https://github.com/Sceletor/cc2-monitor/releases/tag/v1.0.1-beta.1).
+Extract it and run `cc2-monitor.exe`. Checksums and instructions are included.
+
 For the Windows x64 build of this fork, see the
 [Actions ZIP download instructions](docs/WINDOWS-DOWNLOAD.md).
 The existing PR workflow tests and builds the executable in one cancellable
