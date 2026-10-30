@@ -61,6 +61,7 @@ pub enum Stage {
     VerifyingRefill { since: Instant, request_id: u64, expected: bool },
     Starting {
         since: Instant,
+        request_id: u64,
     },
     Failed(String),
 }
