@@ -1,0 +1,21 @@
+name: Security regression checks
+
+on:
+  push:
+    branches:
+      - fix/security-canvas-safety-20261030
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run unit and integration tests
+        run: cargo test --locked --all-targets
+      - name: Check release build
+        run: cargo check --locked --release
