@@ -144,6 +144,15 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
+        // Ignore legacy plaintext settings; restore only the DPAPI-protected code.
+        if !settings.protected_access_code.is_empty() {
+            if let Some(code) = crate::secret::unprotect(&settings.protected_access_code) {
+                settings.access_code = code;
+            } else {
+                settings.access_code.clear();
+                settings.auto_connect = false;
+            }
+        }
         // Point at a printer without going through the dialog (handy for dev).
         if let Ok(ip) = std::env::var("CC2_IP") {
             if ip.trim() != settings.ip {
@@ -209,6 +218,11 @@ impl App {
         self.disconnect();
         let ip = self.settings.ip.trim().to_string();
         if ip.is_empty() {
+            self.ui.show_connect = true;
+            return;
+        }
+        if ip.parse::<std::net::Ipv4Addr>().is_err() {
+            self.toast(ToastKind::Error, "Enter a valid printer IPv4 address, not a URL or hostname.");
             self.ui.show_connect = true;
             return;
         }
@@ -959,6 +973,8 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.settings.protected_access_code =
+            crate::secret::protect(&self.settings.access_code).unwrap_or_default();
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
     }
 
