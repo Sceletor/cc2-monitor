@@ -254,6 +254,10 @@ fn decode(jpeg: &[u8], scale: u8) -> Option<(RgbImage, [usize; 2])> {
     let mut d = jpeg_decoder::Decoder::new(jpeg);
     d.read_info().ok()?;
     let info = d.info()?;
+    // Bound decoded pixels, not just the compressed MJPEG buffer.
+    if (info.width as u64) * (info.height as u64) > 8_000_000 {
+        return None;
+    }
     let source = [info.width as usize, info.height as usize];
     let (w, h) = if scale > 1 {
         d.scale(info.width / scale as u16, info.height / scale as u16)
